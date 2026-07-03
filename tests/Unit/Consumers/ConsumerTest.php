@@ -21,7 +21,7 @@ use PhpAmqpLib\Message\AMQPMessage;
  */
 class OrderRetryProbeConsumer extends Consumer
 {
-    public function callHandleJobException(RabbitMQJob $job, \Throwable $e): void
+    public function callHandleJobException(RabbitMQJob $job, Throwable $e): void
     {
         $this->handleJobException($job, $e);
     }

@@ -9,6 +9,7 @@ use Illuminate\Contracts\Queue\Job as JobContract;
 use Illuminate\Queue\Jobs\Job;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Log;
+use Lettermint\RabbitMQ\Attributes\ConsumesQueue;
 use Lettermint\RabbitMQ\Exceptions\ConnectionException;
 use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Message\AMQPMessage;
@@ -193,7 +194,7 @@ class RabbitMQJob extends Job implements JobContract
      * which {@see attempts()} reads, so the attempt counter advances across
      * requeues and the job still parks (to the DLX) once it reaches the tries
      * cap — it does not churn forever. Deployments should additionally set an
-     * `x-delivery-limit` (see {@see \Lettermint\RabbitMQ\Attributes\ConsumesQueue::$deliveryLimit})
+     * `x-delivery-limit` (see {@see ConsumesQueue::$deliveryLimit})
      * so the broker parks a poison message even when no consumer enforces the
      * app-side cap.
      *
