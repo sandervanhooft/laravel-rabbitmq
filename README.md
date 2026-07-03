@@ -286,6 +286,41 @@ quorum queues and requires RabbitMQ 3.8+.
 > queue is deleted and re-declared. The setting is opt-in and defaults to
 > `false`, so existing deployments are unaffected until you enable it.
 
+**Sharded ordering** with a per-message routing key (`HasRoutingKey`):
+
+A single active consumer preserves order but processes one message at a time.
+To keep per-key ordering *and* fan out in parallel, shard a topic exchange
+across N single-active queues and route each message to a shard by a stable
+key. Implement `HasRoutingKey` to set the routing key per dispatched instance:
+
+```php
+use Lettermint\RabbitMQ\Contracts\HasRoutingKey;
+
+#[Exchange(name: 'events', type: ExchangeType::Topic)]
+#[ConsumesQueue(
+    queue: 'events.shard.0',
+    bindings: ['events' => 'events.shard.0'],
+    quorum: true,
+    prefetch: 1,
+    singleActiveConsumer: true,
+)]
+class ProjectEvent implements ShouldQueue, HasRoutingKey
+{
+    public function __construct(private string $aggregateId) {}
+
+    public function getRoutingKey(): string
+    {
+        return 'events.shard.'.(crc32($this->aggregateId) % 16);
+    }
+}
+```
+
+The routing key overrides the static binding key (the exchange is still taken
+from the attribute) and is stored in the payload, so a retried re-publish lands
+on the same shard. Declare the N shard queues (each `singleActiveConsumer: true`)
+and let one worker drain them all via `rabbitmq:consume events.shard.0 …`.
+Opt-in: jobs that don't implement `HasRoutingKey` are unaffected.
+
 **Delayed/scheduled messages:**
 
 ```php

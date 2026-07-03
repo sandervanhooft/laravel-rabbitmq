@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+* `HasRoutingKey` contract: implement it on a job to publish with a per-message
+  routing key (`getRoutingKey(): string`) instead of the static `#[ConsumesQueue]`
+  binding key. The exchange is still resolved from the attribute. The key is
+  injected into the payload at publish time, so a retried re-publish keeps the
+  original route — useful for sharding a topic exchange across many queues by a
+  stable key (e.g. an aggregate id) to preserve per-key ordering while different
+  keys fan out in parallel. Opt-in; jobs without the contract are unchanged.
 * `ConsumesQueue`: opt-in `singleActiveConsumer` flag that declares the queue
   with `x-single-active-consumer`, electing a single active consumer (with
   standby failover) for strict FIFO ordering across multiple workers.
