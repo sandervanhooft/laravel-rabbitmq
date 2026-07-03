@@ -196,6 +196,39 @@ test('auto-creates DLQ queue', function () {
     expect($result['bindings'])->toContain('emails.dlq -> dlq:emails:outbound [emails.outbound]');
 });
 
+test('declares the DLX exchange for a queue whose DLX derives from its bindings', function () {
+    // No matching Exchange attribute, so the exchange loop does not create the
+    // DLX. declareDlqQueue must declare 'orders.dlq' itself, otherwise the
+    // queue's x-dead-letter-exchange (and x-delivery-limit parking) would target
+    // an undeclared exchange and messages would be dropped.
+    $queueAttr = new ConsumesQueue(
+        queue: 'orders:process',
+        bindings: ['orders' => 'process.*'],
+        quorum: true,
+        deliveryLimit: 3,
+    );
+
+    $this->scanner->shouldReceive('getTopology')->andReturn([
+        'exchanges' => [],
+        'queues' => ['orders:process' => ['attribute' => $queueAttr, 'class' => 'TestJob', 'allBindings' => $queueAttr->bindings]],
+    ]);
+
+    $this->mockChannel->shouldReceive('exchange_declare')
+        ->withArgs(fn ($name, $type) => $name === 'orders.dlq' && $type === 'direct')
+        ->once();
+
+    $manager = new TopologyManager(
+        $this->channelManager,
+        $this->scanner,
+        $this->config
+    );
+
+    $manager->declare(dryRun: false);
+
+    // Expectation verified on teardown by Mockery.
+    expect(true)->toBeTrue();
+});
+
 test('purges queue', function () {
     // Mock channel to return purge count
     $this->mockChannel->shouldReceive('queue_purge')
