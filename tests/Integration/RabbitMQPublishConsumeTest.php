@@ -42,7 +42,7 @@ describe('RabbitMQ Publish/Consume Integration', function () {
             $channelManager = app(ChannelManager::class);
             $channel = $channelManager->topologyChannel();
             $channel->queue_delete('integration-test-queue');
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             // Queue may not exist, ignore
         }
 
@@ -50,7 +50,7 @@ describe('RabbitMQ Publish/Consume Integration', function () {
         try {
             $connectionManager = app(ConnectionManager::class);
             $connectionManager->disconnect();
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             // Ignore cleanup errors
         }
     });
