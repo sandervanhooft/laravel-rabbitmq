@@ -213,9 +213,23 @@ test('declares the DLX exchange for a queue whose DLX derives from its bindings'
         'queues' => ['orders:process' => ['attribute' => $queueAttr, 'class' => 'TestJob', 'allBindings' => $queueAttr->bindings]],
     ]);
 
+    // The DLX exchange must be declared BEFORE the DLQ queue is declared and
+    // bound to it — ordered() guards that sequence, not just its presence.
     $this->mockChannel->shouldReceive('exchange_declare')
         ->withArgs(fn ($name, $type) => $name === 'orders.dlq' && $type === 'direct')
-        ->once();
+        ->once()
+        ->ordered();
+
+    $this->mockChannel->shouldReceive('queue_declare')
+        ->withArgs(fn ($name) => $name === 'dlq:orders:process')
+        ->once()
+        ->ordered()
+        ->andReturn(['dlq:orders:process', 0, 0]);
+
+    $this->mockChannel->shouldReceive('queue_bind')
+        ->withArgs(fn ($queue, $exchange) => $queue === 'dlq:orders:process' && $exchange === 'orders.dlq')
+        ->once()
+        ->ordered();
 
     $manager = new TopologyManager(
         $this->channelManager,
@@ -225,7 +239,7 @@ test('declares the DLX exchange for a queue whose DLX derives from its bindings'
 
     $manager->declare(dryRun: false);
 
-    // Expectation verified on teardown by Mockery.
+    // Expectations verified on teardown by Mockery.
     expect(true)->toBeTrue();
 });
 
