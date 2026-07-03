@@ -179,6 +179,53 @@ class RabbitMQJob extends Job implements JobContract
     }
 
     /**
+     * Requeue the job in place, preserving per-aggregate FIFO order.
+     *
+     * Unlike {@see releaseWithException()} — which acks the message and
+     * re-publishes it to the queue TAIL, letting later messages overtake it —
+     * this rejects the message with `requeue = true`. On a quorum queue served
+     * by a single active consumer at prefetch 1, RabbitMQ returns the message to
+     * the HEAD of the queue and redelivers it before any successor is delivered,
+     * so a transiently-failed message for aggregate version 5 is retried before
+     * versions 6/7 rather than after them.
+     *
+     * The broker increments the quorum-queue `x-delivery-count` on each requeue,
+     * which {@see attempts()} reads, so the attempt counter advances across
+     * requeues and the job still parks (to the DLX) once it reaches the tries
+     * cap — it does not churn forever. Deployments should additionally set an
+     * `x-delivery-limit` (see {@see \Lettermint\RabbitMQ\Attributes\ConsumesQueue::$deliveryLimit})
+     * so the broker parks a poison message even when no consumer enforces the
+     * app-side cap.
+     *
+     * The trade-off versus the tail-republish path is that there is no inter-
+     * attempt delay: retries happen back-to-back until success or the tries cap.
+     * This is the correct trade for order-sensitive FIFO shards, where a delayed
+     * retry would either reorder the stream or require blocking the whole shard.
+     *
+     * @throws ConnectionException When the reject fails
+     */
+    public function requeue(): void
+    {
+        parent::release(0);
+
+        try {
+            // Reject WITH requeue: quorum returns the message to the head and
+            // redelivers it in order (incrementing x-delivery-count).
+            $this->rabbitmq->reject($this->message, $this->channel, true);
+        } catch (ConnectionException $e) {
+            Log::error('Failed to requeue RabbitMQ message in place', [
+                'queue' => $this->queueName,
+                'job_id' => $this->getJobId(),
+                'job_name' => $this->getName(),
+                'delivery_tag' => $this->message->getDeliveryTag(),
+                'error' => $e->getMessage(),
+            ]);
+
+            throw $e;
+        }
+    }
+
+    /**
      * Delete the job from the queue (acknowledge successful processing).
      *
      * CRITICAL: If acknowledgment fails after job completion, the message
@@ -210,9 +257,19 @@ class RabbitMQJob extends Job implements JobContract
     /**
      * Get the number of times the job has been attempted.
      *
-     * Checks payload first (for replayed DLQ messages), then falls back
-     * to x-death headers. This is necessary because x-death headers are
-     * lost when messages are replayed via pushRaw().
+     * Resolution order:
+     * 1. Payload `attempts` — set when replaying a message from the DLQ, where
+     *    the native broker counters are lost across the `pushRaw()` round-trip.
+     * 2. Quorum `x-delivery-count` — the broker increments this each time a
+     *    message is requeued in place ({@see requeue()}) or redelivered after a
+     *    consumer drop. It is the authoritative attempt counter for the
+     *    order-preserving retry path; the first delivery omits the header.
+     * 3. `x-death` counts — set when a message cycles through a dead-letter
+     *    exchange (e.g. TTL-based retry queues). Summed across entries.
+     *
+     * The counters measure distinct retry mechanisms and are additive, so a
+     * message that was both delivery-count-requeued and dead-lettered reports
+     * the sum (which only ever parks it sooner, never later).
      */
     public function attempts(): int
     {
@@ -223,21 +280,25 @@ class RabbitMQJob extends Job implements JobContract
             return $payload['attempts'];
         }
 
-        // Fall back to x-death header (native RabbitMQ retry tracking)
         $headers = $this->getHeaders();
 
+        // Quorum queues track requeues (including in-place) via x-delivery-count.
+        // Absent on the first delivery; equals the number of prior deliveries.
+        $deliveryCount = isset($headers['x-delivery-count'])
+            ? (int) $headers['x-delivery-count']
+            : 0;
+
+        // x-death tracks dead-letter cycles (native RabbitMQ retry tracking).
+        $deathCount = 0;
         if (isset($headers['x-death']) && is_array($headers['x-death'])) {
-            $totalCount = 0;
             foreach ($headers['x-death'] as $death) {
                 // php-amqplib may return AMQPTable for nested structures
                 $deathData = $death instanceof AMQPTable ? $death->getNativeData() : $death;
-                $totalCount += (int) ($deathData['count'] ?? 0);
+                $deathCount += (int) ($deathData['count'] ?? 0);
             }
-
-            return $totalCount + 1;
         }
 
-        return 1;
+        return $deliveryCount + $deathCount + 1;
     }
 
     /**

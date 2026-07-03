@@ -125,6 +125,93 @@ test('calculates attempts from x-death header', function () {
     expect($job->attempts())->toBe(4);
 });
 
+test('calculates attempts from quorum x-delivery-count header', function () {
+    // Quorum queues expose the number of prior deliveries; the header is absent
+    // on the first delivery and equals 2 after two in-place requeues.
+    $message = mockAMQPMessage([
+        'headers' => ['x-delivery-count' => 2],
+    ]);
+
+    $job = new RabbitMQJob(
+        $this->container,
+        $this->rabbitmq,
+        $this->mockChannel,
+        $message,
+        'rabbitmq',
+        'test-queue'
+    );
+
+    // 2 prior deliveries + 1 current = 3
+    expect($job->attempts())->toBe(3);
+});
+
+test('sums x-delivery-count and x-death when both are present', function () {
+    $message = mockAMQPMessage([
+        'headers' => [
+            'x-delivery-count' => 1,
+            'x-death' => [
+                ['queue' => 'original-queue', 'count' => 2, 'reason' => 'rejected'],
+            ],
+        ],
+    ]);
+
+    $job = new RabbitMQJob(
+        $this->container,
+        $this->rabbitmq,
+        $this->mockChannel,
+        $message,
+        'rabbitmq',
+        'test-queue'
+    );
+
+    // 1 (delivery-count) + 2 (x-death) + 1 current = 4
+    expect($job->attempts())->toBe(4);
+});
+
+test('payload attempts still take precedence over broker headers', function () {
+    $message = mockAMQPMessage([
+        'body' => createFailedJobPayload('App\\Jobs\\Thing', 'test-queue', attemptCount: 7),
+        'headers' => ['x-delivery-count' => 2],
+    ]);
+
+    $job = new RabbitMQJob(
+        $this->container,
+        $this->rabbitmq,
+        $this->mockChannel,
+        $message,
+        'rabbitmq',
+        'test-queue'
+    );
+
+    // Replayed-from-DLQ payload counter wins over the (reset) broker headers.
+    expect($job->attempts())->toBe(7);
+});
+
+test('requeue rejects the message in place with requeue = true', function () {
+    $message = mockAMQPMessage(['deliveryTag' => 42]);
+
+    // Order-preserving retry returns the message to the head of the quorum
+    // queue: basic_reject with requeue = true, and no tail re-publish.
+    $this->mockChannel->shouldReceive('basic_reject')
+        ->once()
+        ->with(42, true)
+        ->andReturnNull();
+    $this->mockChannel->shouldNotReceive('basic_publish');
+
+    $job = new RabbitMQJob(
+        $this->container,
+        $this->rabbitmq,
+        $this->mockChannel,
+        $message,
+        'rabbitmq',
+        'test-queue'
+    );
+
+    $job->requeue();
+
+    expect($job->isReleased())->toBeTrue();
+});
+
 test('decodes payload correctly', function () {
     $payload = [
         'uuid' => 'test-uuid',

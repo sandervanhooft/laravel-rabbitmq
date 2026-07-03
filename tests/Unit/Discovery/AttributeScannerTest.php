@@ -89,6 +89,21 @@ test('getQueueForJob returns null for job without attribute', function () {
     expect($attribute)->toBeNull();
 });
 
+test('getAttributeForQueue returns the attribute for a declared queue name', function () {
+    $this->scanner->scan([__DIR__.'/../../Fixtures/Jobs']);
+
+    $attribute = $this->scanner->getAttributeForQueue('emails:outbound');
+
+    expect($attribute)->toBeInstanceOf(ConsumesQueue::class);
+    expect($attribute->queue)->toBe('emails:outbound');
+});
+
+test('getAttributeForQueue returns null for an unknown queue name', function () {
+    $this->scanner->scan([__DIR__.'/../../Fixtures/Jobs']);
+
+    expect($this->scanner->getAttributeForQueue('does:not:exist'))->toBeNull();
+});
+
 test('getQueueForJob returns null for non-existent class', function () {
     $this->scanner->scan([__DIR__.'/../../Fixtures/Jobs']);
 

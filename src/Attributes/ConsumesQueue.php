@@ -49,13 +49,16 @@ use Lettermint\RabbitMQ\Enums\RetryStrategy;
  *     maxPriority: 10,
  * )]
  *
- * // Strict FIFO ordering (single active consumer + prefetch 1)
+ * // Strict FIFO ordering (single active consumer + prefetch 1).
+ * // On failure the consumer requeues the message in place (retried before its
+ * // successors); deliveryLimit parks a poison message to the DLX after N tries.
  * #[ConsumesQueue(
  *     queue: 'ordered:events',
  *     bindings: ['events' => '#'],
  *     quorum: true,
  *     prefetch: 1,
  *     singleActiveConsumer: true,
+ *     deliveryLimit: 5,
  * )]
  * ```
  */
@@ -102,6 +105,7 @@ final class ConsumesQueue
      * @param  int  $prefetch  Consumer prefetch count / QoS (default: 10)
      * @param  int  $timeout  Job timeout in seconds (default: 30)
      * @param  bool  $singleActiveConsumer  Elect a single active consumer for the queue; other consumers stay on standby and take over on failover (default: false). Enables strict FIFO ordering even when multiple workers connect. Compatible with quorum queues. Requires RabbitMQ 3.8+.
+     * @param  int|null  $deliveryLimit  Quorum-queue delivery limit (`x-delivery-limit`). After this many delivery attempts RabbitMQ dead-letters the message to the DLX instead of redelivering it, so an order-preserving in-place requeue cannot churn a poison message forever. Quorum queues only; ignored on classic queues. Requires a dead-letter exchange (present when the queue has bindings). Frozen at declaration time — changing it on an existing queue needs the queue recreated. (default: null = broker default)
      *
      * @throws InvalidArgumentException When validation fails
      */
@@ -120,6 +124,7 @@ final class ConsumesQueue
         public int $prefetch = 10,
         public int $timeout = 30,
         public bool $singleActiveConsumer = false,
+        public ?int $deliveryLimit = null,
     ) {
         // Validate queue name
         if (trim($this->queue) === '') {
@@ -160,6 +165,21 @@ final class ConsumesQueue
         if ($this->retryAttempts < 0) {
             throw new InvalidArgumentException(
                 "retryAttempts cannot be negative, got {$this->retryAttempts}"
+            );
+        }
+
+        // Validate deliveryLimit (quorum x-delivery-limit must be a positive count)
+        if ($this->deliveryLimit !== null && $this->deliveryLimit < 1) {
+            throw new InvalidArgumentException(
+                "deliveryLimit must be at least 1, got {$this->deliveryLimit}"
+            );
+        }
+
+        // A delivery limit is only honoured by quorum queues
+        if ($this->deliveryLimit !== null && ! $this->quorum) {
+            throw new InvalidArgumentException(
+                'deliveryLimit (x-delivery-limit) is only supported on quorum queues. '.
+                'Either set quorum: true, or remove deliveryLimit.'
             );
         }
 
@@ -310,6 +330,14 @@ final class ConsumesQueue
         // queue raises PRECONDITION_FAILED until the queue is recreated.
         if ($this->singleActiveConsumer) {
             $arguments['x-single-active-consumer'] = true;
+        }
+
+        // Opt-in, quorum-only. Bounds in-place retry: after this many delivery
+        // attempts the broker dead-letters the message to the DLX rather than
+        // redelivering it, so an order-preserving requeue cannot churn a poison
+        // message forever. Same declaration-time-frozen caveat as above.
+        if ($this->deliveryLimit !== null && $this->quorum) {
+            $arguments['x-delivery-limit'] = $this->deliveryLimit;
         }
 
         if ($this->maxPriority !== null) {

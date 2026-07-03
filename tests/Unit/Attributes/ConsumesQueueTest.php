@@ -82,6 +82,14 @@ describe('ConsumesQueue attribute', function () {
             new ConsumesQueue(queue: 'test', timeout: 0);
         })->throws(InvalidArgumentException::class, 'timeout must be at least 1 second');
 
+        it('throws when deliveryLimit is less than 1', function () {
+            new ConsumesQueue(queue: 'test', quorum: true, deliveryLimit: 0);
+        })->throws(InvalidArgumentException::class, 'deliveryLimit must be at least 1');
+
+        it('throws when deliveryLimit is set on a classic queue', function () {
+            new ConsumesQueue(queue: 'test', quorum: false, deliveryLimit: 5);
+        })->throws(InvalidArgumentException::class, 'only supported on quorum queues');
+
         it('throws when retryAttempts is negative', function () {
             new ConsumesQueue(queue: 'test', retryAttempts: -1);
         })->throws(InvalidArgumentException::class, 'retryAttempts cannot be negative');
@@ -265,6 +273,21 @@ describe('ConsumesQueue attribute', function () {
 
             expect($args['x-queue-type'])->toBe('quorum');
             expect($args['x-single-active-consumer'])->toBeTrue();
+        });
+
+        it('includes delivery limit argument on a quorum queue when set', function () {
+            $attr = new ConsumesQueue(queue: 'test', quorum: true, deliveryLimit: 5);
+            $args = $attr->getQueueArguments();
+
+            expect($args)->toHaveKey('x-delivery-limit');
+            expect($args['x-delivery-limit'])->toBe(5);
+        });
+
+        it('omits delivery limit argument by default', function () {
+            $attr = new ConsumesQueue(queue: 'test', quorum: true);
+            $args = $attr->getQueueArguments();
+
+            expect($args)->not->toHaveKey('x-delivery-limit');
         });
 
         it('includes maxPriority argument', function () {

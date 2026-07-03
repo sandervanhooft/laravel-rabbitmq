@@ -327,10 +327,35 @@ class Consumer
         // Check if we should fail the job or retry
         if ($this->tries > 0 && $job->attempts() >= $this->tries) {
             $this->failJob($job, $e);
+        } elseif ($this->shouldRetryInOrder($job)) {
+            // Order-sensitive FIFO shard: requeue in place so the failed message
+            // is retried before its successors instead of jumping to the tail.
+            $job->requeue();
         } else {
-            // Release the job with exception info for DLQ inspection
+            // Release the job with exception info for DLQ inspection.
             $job->releaseWithException(0, $e);
         }
+    }
+
+    /**
+     * Whether a failed job on this queue must be retried in place (preserving
+     * per-aggregate FIFO order) rather than re-published to the queue tail.
+     *
+     * True only for the strict-ordering profile — a quorum queue with a single
+     * active consumer — where RabbitMQ returns a requeued message to the head
+     * and the broker tracks attempts via `x-delivery-count`. Commutative queues
+     * (e.g. the round-robined `default` queue) keep the tail-republish path,
+     * whose inter-attempt spacing is harmless when order does not matter and
+     * which avoids a tight redelivery loop on non-quorum queues that lack a
+     * delivery counter.
+     */
+    protected function shouldRetryInOrder(RabbitMQJob $job): bool
+    {
+        $attribute = $this->scanner->getAttributeForQueue($job->getQueue());
+
+        return $attribute !== null
+            && $attribute->quorum
+            && $attribute->singleActiveConsumer;
     }
 
     /**

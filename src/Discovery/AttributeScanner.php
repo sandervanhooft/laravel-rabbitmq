@@ -196,6 +196,22 @@ class AttributeScanner
     }
 
     /**
+     * Get the queue attribute for a specific queue name.
+     *
+     * A queue may be declared by more than one job class (repeatable
+     * attributes with merged bindings); the first declaration wins, matching
+     * the base attribute {@see getTopology()} uses for that queue's settings.
+     *
+     * @param  string  $queue  The queue name (e.g. 'ordered.shard.0')
+     */
+    public function getAttributeForQueue(string $queue): ?ConsumesQueue
+    {
+        $matched = $this->queues->first(fn ($item) => $item['attribute']->queue === $queue);
+
+        return $matched['attribute'] ?? null;
+    }
+
+    /**
      * Build a complete topology representation.
      *
      * When multiple jobs declare the same queue with different bindings,
