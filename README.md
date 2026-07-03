@@ -515,7 +515,16 @@ php artisan rabbitmq:consume my-queue \
 
 # Stop when empty (useful for testing)
 php artisan rabbitmq:consume my-queue --stop-when-empty
+
+# Consume from several queues with one worker process
+php artisan rabbitmq:consume orders payments notifications
 ```
+
+One worker can consume from multiple queues by passing more than one queue
+name. The worker registers a separate consumer for each queue on a single
+channel and processes whichever delivers next. Each queue keeps its own FIFO
+order; there is no total order *across* queues (that is inherent to consuming
+more than one queue). The `--prefetch` limit applies per queue.
 
 **Consumer Options:**
 - `--prefetch`: Messages to prefetch (default: 10)

@@ -14,6 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   standby failover) for strict FIFO ordering across multiple workers.
   Defaults to `false`; the queue-arguments table is unchanged when not set, so
   existing queues are unaffected. Compatible with quorum queues.
+* `rabbitmq:consume` now accepts multiple queue names, so a single worker
+  process can consume from several queues (`rabbitmq:consume orders payments`).
+  The worker registers one consumer per queue on a single channel; each queue
+  keeps its own FIFO order and `--prefetch` applies per queue. Backwards
+  compatible — a single queue argument behaves exactly as before.
 
 ## 1.0.0 - 2026-01-02
 
