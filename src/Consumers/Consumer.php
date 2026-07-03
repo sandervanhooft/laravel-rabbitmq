@@ -341,16 +341,30 @@ class Consumer
      * Whether a failed job on this queue must be retried in place (preserving
      * per-aggregate FIFO order) rather than re-published to the queue tail.
      *
-     * True only for the strict-ordering profile — a quorum queue with a single
-     * active consumer — where RabbitMQ returns a requeued message to the head
-     * and the broker tracks attempts via `x-delivery-count`. Commutative queues
-     * (e.g. the round-robined `default` queue) keep the tail-republish path,
-     * whose inter-attempt spacing is harmless when order does not matter and
-     * which avoids a tight redelivery loop on non-quorum queues that lack a
-     * delivery counter.
+     * True only for the strict-ordering profile, which needs ALL of:
+     * - **prefetch 1** on the running consumer, so at most one message is in
+     *   flight and its successors have not yet been delivered — otherwise a
+     *   buffered successor may already be mid-processing and requeueing the
+     *   failed message no longer puts it back ahead of them;
+     * - a **quorum** queue, whose broker returns a requeued message to the head
+     *   and tracks attempts via `x-delivery-count`;
+     * - a **single active consumer**, so no sibling consumer overtakes the
+     *   requeued message or processes a successor concurrently.
+     *
+     * Note the prefetch check reads the *running* consumer's QoS
+     * (`$this->prefetch`), not the queue attribute's metadata — the two can
+     * diverge (`rabbitmq:consume --prefetch=N`), and only the live QoS governs
+     * how many messages are in flight. Outside this profile — commutative
+     * queues, or an ordered queue accidentally consumed at prefetch > 1 — the
+     * tail-republish path is used, whose lack of ordering is either harmless
+     * (commutative) or no worse than the already-broken order (prefetch > 1).
      */
     protected function shouldRetryInOrder(RabbitMQJob $job): bool
     {
+        if ($this->prefetch !== 1) {
+            return false;
+        }
+
         $attribute = $this->scanner->getAttributeForQueue($job->getQueue());
 
         return $attribute !== null

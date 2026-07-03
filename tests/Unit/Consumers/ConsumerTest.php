@@ -58,6 +58,9 @@ function makeOrderRetryConsumer(MockInterface $scanner): array
     $exceptions->shouldReceive('report')->andReturnNull();
 
     $consumer = new OrderRetryProbeConsumer($channelManager, $scanner, $rabbitmq, $exceptions, $events);
+    // The strict-ordering profile runs at prefetch 1; tests that exercise the
+    // in-place requeue path rely on it. The prefetch-guard test overrides this.
+    $consumer->setPrefetch(1);
 
     return [$consumer, $channel, $rabbitmq];
 }
@@ -302,6 +305,21 @@ describe('shouldRetryInOrder', function () {
 
         [$consumer, $channel, $rabbitmq] = makeOrderRetryConsumer($scanner);
         $job = orderRetryJob($rabbitmq, $channel, mockAMQPMessage(), 'mystery');
+
+        expect($consumer->callShouldRetryInOrder($job))->toBeFalse();
+    });
+
+    it('is false when the running consumer prefetch is greater than 1', function () {
+        // Even a single-active quorum queue must NOT retry in place if the
+        // consumer runs at prefetch > 1 — successors may already be in flight.
+        $scanner = Mockery::mock(AttributeScanner::class);
+        // The prefetch gate short-circuits before the attribute is consulted.
+        $scanner->shouldReceive('getAttributeForQueue')->never();
+
+        [$consumer, $channel, $rabbitmq] = makeOrderRetryConsumer($scanner);
+        $consumer->setPrefetch(10);
+
+        $job = orderRetryJob($rabbitmq, $channel, mockAMQPMessage(), 'ordered.shard.0');
 
         expect($consumer->callShouldRetryInOrder($job))->toBeFalse();
     });

@@ -183,6 +183,19 @@ final class ConsumesQueue
             );
         }
 
+        // A delivery limit needs somewhere to park. Without a dead-letter
+        // exchange RabbitMQ DROPS the message when the limit is exceeded, which
+        // would silently turn the poison-message safety feature into message
+        // loss. The queue's DLX is derived from THIS attribute's bindings /
+        // dlqExchange (see getQueueArguments()), so require one here.
+        if ($this->deliveryLimit !== null && $this->getDlqExchangeName() === null) {
+            throw new InvalidArgumentException(
+                'deliveryLimit requires a dead-letter exchange so messages that exceed the '.
+                'limit are parked rather than dropped. Provide a binding (to derive the DLQ '.
+                'exchange) or set dlqExchange explicitly.'
+            );
+        }
+
         // Validate messageTtl
         if ($this->messageTtl !== null && $this->messageTtl < 0) {
             throw new InvalidArgumentException(
