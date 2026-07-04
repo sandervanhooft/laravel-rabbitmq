@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Lettermint\RabbitMQ\Connection\ChannelManager;
+use PhpAmqpLib\Channel\AMQPChannel;
 use PhpAmqpLib\Message\AMQPMessage;
 use PhpAmqpLib\Wire\AMQPTable;
 
@@ -168,7 +169,7 @@ describe('RabbitMQ requeue + parking behavior', function () {
  * basic_get with a short retry, to absorb the small window between publish/
  * requeue and the message becoming available on a quorum queue.
  */
-function basicGetWithRetry(PhpAmqpLib\Channel\AMQPChannel $channel, string $queue, int $attempts = 20): ?AMQPMessage
+function basicGetWithRetry(AMQPChannel $channel, string $queue, int $attempts = 20): ?AMQPMessage
 {
     for ($i = 0; $i < $attempts; $i++) {
         $message = $channel->basic_get($queue, false);
