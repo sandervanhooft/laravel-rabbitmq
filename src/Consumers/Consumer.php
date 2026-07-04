@@ -327,49 +327,44 @@ class Consumer
         // Check if we should fail the job or retry
         if ($this->tries > 0 && $job->attempts() >= $this->tries) {
             $this->failJob($job, $e);
-        } elseif ($this->shouldRetryInOrder($job)) {
-            // Order-sensitive FIFO shard: requeue in place so the failed message
-            // is retried before its successors instead of jumping to the tail.
+        } elseif ($this->requeuePreservesAttempts($job)) {
+            // Quorum queue: requeue the SAME message (reject with requeue) so the
+            // broker keeps incrementing x-delivery-count. That lets a poison
+            // message actually park (via the tries cap and x-delivery-limit)
+            // instead of churning forever, which the ack+republish path below
+            // cannot do because it mints a fresh message with a reset counter.
             $job->requeue();
         } else {
-            // Release the job with exception info for DLQ inspection.
+            // Non-quorum queue: release with exception info for DLQ inspection.
             $job->releaseWithException(0, $e);
         }
     }
 
     /**
-     * Whether a failed job on this queue must be retried in place (preserving
-     * per-aggregate FIFO order) rather than re-published to the queue tail.
+     * Whether requeueing a failed job (reject with requeue) preserves the
+     * broker's redelivery counter, so the retry counts toward the tries cap and
+     * the queue's `x-delivery-limit` rather than churning forever.
      *
-     * True only for the strict-ordering profile, which needs ALL of:
-     * - **prefetch 1** on the running consumer, so at most one message is in
-     *   flight and its successors have not yet been delivered — otherwise a
-     *   buffered successor may already be mid-processing and requeueing the
-     *   failed message no longer puts it back ahead of them;
-     * - a **quorum** queue, whose broker returns a requeued message to the head
-     *   and tracks attempts via `x-delivery-count`;
-     * - a **single active consumer**, so no sibling consumer overtakes the
-     *   requeued message or processes a successor concurrently.
+     * True on **quorum** queues, which maintain `x-delivery-count` across a
+     * requeue (see {@see RabbitMQJob::attempts()}). On non-quorum queues that
+     * counter does not exist, so requeueing would loop a poison message with no
+     * way to park it; those keep the ack+republish path instead.
      *
-     * Note the prefetch check reads the *running* consumer's QoS
-     * (`$this->prefetch`), not the queue attribute's metadata — the two can
-     * diverge (`rabbitmq:consume --prefetch=N`), and only the live QoS governs
-     * how many messages are in flight. Outside this profile — commutative
-     * queues, or an ordered queue accidentally consumed at prefetch > 1 — the
-     * tail-republish path is used, whose lack of ordering is either harmless
-     * (commutative) or no worse than the already-broken order (prefetch > 1).
+     * This is NOT an ordering decision. RabbitMQ requeues a message to the
+     * TAIL of a quorum queue (a documented consequence of the Raft log — it
+     * cannot accumulate messages at the head), so a requeued message is retried
+     * AFTER its already-enqueued successors, single-active-consumer and
+     * prefetch 1 notwithstanding. Consumers that require per-key ordering must
+     * be idempotent and carry their own position/version guard; the transport
+     * does not provide ordered redelivery under failure.
+     *
+     * @see https://github.com/rabbitmq/rabbitmq-server/discussions/10500
      */
-    protected function shouldRetryInOrder(RabbitMQJob $job): bool
+    protected function requeuePreservesAttempts(RabbitMQJob $job): bool
     {
-        if ($this->prefetch !== 1) {
-            return false;
-        }
-
         $attribute = $this->scanner->getAttributeForQueue($job->getQueue());
 
-        return $attribute !== null
-            && $attribute->quorum
-            && $attribute->singleActiveConsumer;
+        return $attribute !== null && $attribute->quorum;
     }
 
     /**

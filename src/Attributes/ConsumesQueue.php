@@ -49,9 +49,12 @@ use Lettermint\RabbitMQ\Enums\RetryStrategy;
  *     maxPriority: 10,
  * )]
  *
- * // Strict FIFO ordering (single active consumer + prefetch 1).
- * // On failure the consumer requeues the message in place (retried before its
- * // successors); deliveryLimit parks a poison message to the DLX after N tries.
+ * // Single active consumer + prefetch 1 (one consumer at a time; best-effort
+ * // ordering on the happy path). deliveryLimit parks a poison message to the
+ * // DLX after N deliveries instead of churning. NOTE: a requeued message is
+ * // placed at the TAIL on quorum queues, so requeue does not guarantee FIFO
+ * // under failure — consumers needing strict per-key order must be idempotent
+ * // and version-guarded.
  * #[ConsumesQueue(
  *     queue: 'ordered:events',
  *     bindings: ['events' => '#'],
@@ -105,7 +108,7 @@ final class ConsumesQueue
      * @param  int  $prefetch  Consumer prefetch count / QoS (default: 10)
      * @param  int  $timeout  Job timeout in seconds (default: 30)
      * @param  bool  $singleActiveConsumer  Elect a single active consumer for the queue; other consumers stay on standby and take over on failover (default: false). Enables strict FIFO ordering even when multiple workers connect. Compatible with quorum queues. Requires RabbitMQ 3.8+.
-     * @param  int|null  $deliveryLimit  Quorum-queue delivery limit (`x-delivery-limit`). After this many delivery attempts RabbitMQ dead-letters the message to the DLX instead of redelivering it, so an order-preserving in-place requeue cannot churn a poison message forever. Quorum queues only; ignored on classic queues. Requires a dead-letter exchange (present when the queue has bindings). Frozen at declaration time — changing it on an existing queue needs the queue recreated. (default: null = broker default)
+     * @param  int|null  $deliveryLimit  Quorum-queue delivery limit (`x-delivery-limit`). After this many delivery attempts RabbitMQ dead-letters the message to the DLX instead of redelivering it, so a repeatedly-failing (poison) message parks rather than churning forever. Quorum queues only; ignored on classic queues. Requires a dead-letter exchange (present when the queue has bindings). Frozen at declaration time — changing it on an existing queue needs the queue recreated. (default: null = broker default)
      *
      * @throws InvalidArgumentException When validation fails
      */

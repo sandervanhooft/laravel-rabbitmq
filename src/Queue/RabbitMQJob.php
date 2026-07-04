@@ -180,28 +180,26 @@ class RabbitMQJob extends Job implements JobContract
     }
 
     /**
-     * Requeue the job in place, preserving per-aggregate FIFO order.
+     * Requeue the job by rejecting it with `requeue = true`, so poison messages
+     * park instead of churning forever.
      *
      * Unlike {@see releaseWithException()} — which acks the message and
-     * re-publishes it to the queue TAIL, letting later messages overtake it —
-     * this rejects the message with `requeue = true`. On a quorum queue served
-     * by a single active consumer at prefetch 1, RabbitMQ returns the message to
-     * the HEAD of the queue and redelivers it before any successor is delivered,
-     * so a transiently-failed message for aggregate version 5 is retried before
-     * versions 6/7 rather than after them.
+     * re-publishes a FRESH copy, resetting the broker's redelivery counter every
+     * time — this returns the SAME message. On a quorum queue RabbitMQ keeps
+     * incrementing `x-delivery-count`, which {@see attempts()} reads, so the
+     * attempt counter advances across requeues and the job parks (to the DLX)
+     * once it reaches the tries cap or the queue's `x-delivery-limit`
+     * (see {@see ConsumesQueue::$deliveryLimit}).
+     * The old fresh-republish path never parked a repeatedly-failing job, which
+     * could wedge a prefetch-1 consumer.
      *
-     * The broker increments the quorum-queue `x-delivery-count` on each requeue,
-     * which {@see attempts()} reads, so the attempt counter advances across
-     * requeues and the job still parks (to the DLX) once it reaches the tries
-     * cap — it does not churn forever. Deployments should additionally set an
-     * `x-delivery-limit` (see {@see ConsumesQueue::$deliveryLimit})
-     * so the broker parks a poison message even when no consumer enforces the
-     * app-side cap.
+     * This does NOT preserve order. RabbitMQ requeues to the TAIL of a quorum
+     * queue (the Raft log cannot accumulate messages at the head), so a requeued
+     * message is retried AFTER its already-enqueued successors — even with a
+     * single active consumer at prefetch 1. Consumers needing per-key ordering
+     * must be idempotent and carry their own position/version guard.
      *
-     * The trade-off versus the tail-republish path is that there is no inter-
-     * attempt delay: retries happen back-to-back until success or the tries cap.
-     * This is the correct trade for order-sensitive FIFO shards, where a delayed
-     * retry would either reorder the stream or require blocking the whole shard.
+     * @see https://github.com/rabbitmq/rabbitmq-server/discussions/10500
      *
      * @throws ConnectionException When the reject fails
      */
@@ -210,11 +208,11 @@ class RabbitMQJob extends Job implements JobContract
         parent::release(0);
 
         try {
-            // Reject WITH requeue: quorum returns the message to the head and
-            // redelivers it in order (incrementing x-delivery-count).
+            // Reject WITH requeue: returns the same message so the quorum queue
+            // keeps incrementing x-delivery-count (RabbitMQ places it at the tail).
             $this->rabbitmq->reject($this->message, $this->channel, true);
         } catch (ConnectionException $e) {
-            Log::error('Failed to requeue RabbitMQ message in place', [
+            Log::error('Failed to requeue RabbitMQ message', [
                 'queue' => $this->queueName,
                 'job_id' => $this->getJobId(),
                 'job_name' => $this->getName(),

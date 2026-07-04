@@ -16,85 +16,7 @@ use PhpAmqpLib\Exception\AMQPTimeoutException;
 use PhpAmqpLib\Message\AMQPMessage;
 
 /**
- * A Consumer subclass exposing the protected retry-decision seams, wired in
- * tests to a real RabbitMQQueue so reject/publish calls land on the mock channel.
- */
-class OrderRetryProbeConsumer extends Consumer
-{
-    public function callHandleJobException(RabbitMQJob $job, Throwable $e): void
-    {
-        $this->handleJobException($job, $e);
-    }
-
-    public function callShouldRetryInOrder(RabbitMQJob $job): bool
-    {
-        return $this->shouldRetryInOrder($job);
-    }
-}
-
-/**
- * Build an OrderRetryProbeConsumer with a real RabbitMQQueue over a mock
- * channel and the given scanner.
- *
- * @return array{0: OrderRetryProbeConsumer, 1: MockInterface, 2: RabbitMQQueue}
- */
-function makeOrderRetryConsumer(MockInterface $scanner): array
-{
-    $connection = mockAMQPConnection(heartbeat: 0);
-    $channel = mockAMQPChannel($connection);
-
-    $channelManager = Mockery::mock(ChannelManager::class);
-    $channelManager->shouldReceive('consumeChannel')->andReturn($channel);
-    $channelManager->shouldReceive('publishChannel')->andReturn($channel);
-    $channelManager->shouldReceive('getConnection')->andReturn($connection);
-
-    $rabbitmq = new RabbitMQQueue($channelManager, $scanner, []);
-    $rabbitmq->setContainer(new Container);
-
-    $events = Mockery::mock(Dispatcher::class);
-    $events->shouldReceive('dispatch')->andReturnNull();
-
-    $exceptions = Mockery::mock(ExceptionHandler::class);
-    $exceptions->shouldReceive('report')->andReturnNull();
-
-    $consumer = new OrderRetryProbeConsumer($channelManager, $scanner, $rabbitmq, $exceptions, $events);
-    // The strict-ordering profile runs at prefetch 1; tests that exercise the
-    // in-place requeue path rely on it. The prefetch-guard test overrides this.
-    $consumer->setPrefetch(1);
-
-    return [$consumer, $channel, $rabbitmq];
-}
-
-/**
- * Wrap a mock message as a RabbitMQJob on the given queue and real transport.
- */
-function orderRetryJob(RabbitMQQueue $rabbitmq, MockInterface $channel, MockInterface $message, string $queue): RabbitMQJob
-{
-    return new RabbitMQJob(new Container, $rabbitmq, $channel, $message, 'rabbitmq', $queue);
-}
-
-function orderedShardAttribute(): ConsumesQueue
-{
-    return new ConsumesQueue(
-        queue: 'ordered.shard.0',
-        bindings: ['vatly.ordered' => 'ordered.shard.0'],
-        quorum: true,
-        prefetch: 1,
-        singleActiveConsumer: true,
-    );
-}
-
-function commutativeQueueAttribute(): ConsumesQueue
-{
-    return new ConsumesQueue(
-        queue: 'default',
-        bindings: ['vatly' => '#'],
-        quorum: true,
-    );
-}
-
-/**
- * Build a Consumer wired to mocked collaborators.
+ * Build a Consumer wired to mocked collaborators (used by the multi-queue tests).
  *
  * @return array{0: Consumer, 1: MockInterface}
  */
@@ -178,8 +100,6 @@ describe('multi-queue consumption', function () {
     });
 
     it('tags each job with the queue it was received from', function () {
-        $connection = mockAMQPConnection(heartbeat: 0);
-
         $consumer = new class(Mockery::mock(ChannelManager::class), Mockery::mock(AttributeScanner::class), Mockery::mock(RabbitMQQueue::class), Mockery::mock(ExceptionHandler::class), Mockery::mock(Dispatcher::class)) extends Consumer
         {
             /** @var list<string> */
@@ -203,44 +123,118 @@ describe('multi-queue consumption', function () {
     });
 });
 
-describe('order-preserving retry', function () {
-    it('requeues a failed job in place on a single-active quorum shard', function () {
+/**
+ * A Consumer subclass exposing the protected retry-decision seams, wired in
+ * tests to a real RabbitMQQueue so reject/publish calls land on the mock channel.
+ */
+class RequeueProbeConsumer extends Consumer
+{
+    public function callHandleJobException(RabbitMQJob $job, Throwable $e): void
+    {
+        $this->handleJobException($job, $e);
+    }
+
+    public function callRequeuePreservesAttempts(RabbitMQJob $job): bool
+    {
+        return $this->requeuePreservesAttempts($job);
+    }
+}
+
+/**
+ * Build a RequeueProbeConsumer with a real RabbitMQQueue over a mock channel
+ * and the given scanner.
+ *
+ * @return array{0: RequeueProbeConsumer, 1: MockInterface, 2: RabbitMQQueue}
+ */
+function makeRequeueConsumer(MockInterface $scanner): array
+{
+    $connection = mockAMQPConnection(heartbeat: 0);
+    $channel = mockAMQPChannel($connection);
+
+    $channelManager = Mockery::mock(ChannelManager::class);
+    $channelManager->shouldReceive('consumeChannel')->andReturn($channel);
+    $channelManager->shouldReceive('publishChannel')->andReturn($channel);
+    $channelManager->shouldReceive('getConnection')->andReturn($connection);
+
+    $rabbitmq = new RabbitMQQueue($channelManager, $scanner, []);
+    $rabbitmq->setContainer(new Container);
+
+    $events = Mockery::mock(Dispatcher::class);
+    $events->shouldReceive('dispatch')->andReturnNull();
+
+    $exceptions = Mockery::mock(ExceptionHandler::class);
+    $exceptions->shouldReceive('report')->andReturnNull();
+
+    $consumer = new RequeueProbeConsumer($channelManager, $scanner, $rabbitmq, $exceptions, $events);
+
+    return [$consumer, $channel, $rabbitmq];
+}
+
+/**
+ * Wrap a mock message as a RabbitMQJob on the given queue and real transport.
+ */
+function requeueJob(RabbitMQQueue $rabbitmq, MockInterface $channel, MockInterface $message, string $queue): RabbitMQJob
+{
+    return new RabbitMQJob(new Container, $rabbitmq, $channel, $message, 'rabbitmq', $queue);
+}
+
+function quorumQueueAttribute(): ConsumesQueue
+{
+    return new ConsumesQueue(
+        queue: 'events:ordered',
+        bindings: ['app' => 'events.*'],
+        quorum: true,
+    );
+}
+
+function classicQueueAttribute(): ConsumesQueue
+{
+    return new ConsumesQueue(
+        queue: 'events:classic',
+        bindings: ['app' => 'events.*'],
+        quorum: false,
+    );
+}
+
+describe('failure handling', function () {
+    it('requeues a failed job on a quorum queue so the delivery counter advances', function () {
         $scanner = Mockery::mock(AttributeScanner::class);
         $scanner->shouldReceive('getAttributeForQueue')
-            ->with('ordered.shard.0')
-            ->andReturn(orderedShardAttribute());
+            ->with('events:ordered')
+            ->andReturn(quorumQueueAttribute());
 
-        [$consumer, $channel, $rabbitmq] = makeOrderRetryConsumer($scanner);
+        [$consumer, $channel, $rabbitmq] = makeRequeueConsumer($scanner);
 
         // First delivery (attempts = 1 < tries), so the retry branch is taken.
         $message = mockAMQPMessage(['deliveryTag' => 7, 'headers' => []]);
 
-        // In-place requeue: reject with requeue = true, and NO tail re-publish.
+        // Reject WITH requeue (same message, x-delivery-count preserved); no
+        // fresh re-publish to the tail.
         $channel->shouldReceive('basic_reject')->once()->with(7, true)->andReturnNull();
         $channel->shouldNotReceive('basic_publish');
         $channel->shouldNotReceive('tx_select');
 
         $consumer->callHandleJobException(
-            orderRetryJob($rabbitmq, $channel, $message, 'ordered.shard.0'),
+            requeueJob($rabbitmq, $channel, $message, 'events:ordered'),
             new RuntimeException('transient failure'),
         );
 
         expect(true)->toBeTrue();
     });
 
-    it('releases a failed job to the tail on a commutative queue', function () {
+    it('re-publishes a failed job on a classic queue (no delivery counter)', function () {
         $scanner = Mockery::mock(AttributeScanner::class);
         $scanner->shouldReceive('getAttributeForQueue')
-            ->with('default')
-            ->andReturn(commutativeQueueAttribute());
+            ->with('events:classic')
+            ->andReturn(classicQueueAttribute());
         // releaseWithException re-publishes via the attribute lookup for routing.
-        $scanner->shouldReceive('getQueueForJob')->andReturn(commutativeQueueAttribute());
+        $scanner->shouldReceive('getQueueForJob')->andReturn(classicQueueAttribute());
 
-        [$consumer, $channel, $rabbitmq] = makeOrderRetryConsumer($scanner);
+        [$consumer, $channel, $rabbitmq] = makeRequeueConsumer($scanner);
 
         $message = mockAMQPMessage(['deliveryTag' => 9, 'headers' => []]);
 
-        // Tail-republish path: ack + re-publish inside a transaction, no requeue.
+        // ack + re-publish inside a transaction, no requeue.
         $channel->shouldReceive('tx_select')->once();
         $channel->shouldReceive('basic_publish')->once();
         $channel->shouldReceive('basic_ack')->once();
@@ -248,7 +242,7 @@ describe('order-preserving retry', function () {
         $channel->shouldNotReceive('basic_reject');
 
         $consumer->callHandleJobException(
-            orderRetryJob($rabbitmq, $channel, $message, 'default'),
+            requeueJob($rabbitmq, $channel, $message, 'events:classic'),
             new RuntimeException('transient failure'),
         );
 
@@ -257,11 +251,11 @@ describe('order-preserving retry', function () {
 
     it('parks a job that reached the tries cap to the DLX (reject, no requeue)', function () {
         $scanner = Mockery::mock(AttributeScanner::class);
-        // At the cap the failJob branch runs before any retry-in-order decision,
-        // so getAttributeForQueue is never consulted.
+        // At the cap the failJob branch runs before any requeue decision, so
+        // getAttributeForQueue is never consulted.
         $scanner->shouldReceive('getAttributeForQueue')->never();
 
-        [$consumer, $channel, $rabbitmq] = makeOrderRetryConsumer($scanner);
+        [$consumer, $channel, $rabbitmq] = makeRequeueConsumer($scanner);
 
         // x-delivery-count 3 => attempts 4 >= default tries 3 => terminal fail.
         $message = mockAMQPMessage(['deliveryTag' => 5, 'headers' => ['x-delivery-count' => 3]]);
@@ -270,7 +264,7 @@ describe('order-preserving retry', function () {
         $channel->shouldReceive('basic_reject')->once()->with(5, false)->andReturnNull();
 
         $consumer->callHandleJobException(
-            orderRetryJob($rabbitmq, $channel, $message, 'ordered.shard.0'),
+            requeueJob($rabbitmq, $channel, $message, 'events:ordered'),
             new RuntimeException('poison'),
         );
 
@@ -278,49 +272,34 @@ describe('order-preserving retry', function () {
     });
 });
 
-describe('shouldRetryInOrder', function () {
-    it('is true for a single-active quorum queue', function () {
+describe('requeuePreservesAttempts', function () {
+    it('is true for a quorum queue (x-delivery-count is maintained)', function () {
         $scanner = Mockery::mock(AttributeScanner::class);
-        $scanner->shouldReceive('getAttributeForQueue')->with('ordered.shard.0')->andReturn(orderedShardAttribute());
+        $scanner->shouldReceive('getAttributeForQueue')->with('events:ordered')->andReturn(quorumQueueAttribute());
 
-        [$consumer, $channel, $rabbitmq] = makeOrderRetryConsumer($scanner);
-        $job = orderRetryJob($rabbitmq, $channel, mockAMQPMessage(), 'ordered.shard.0');
+        [$consumer, $channel, $rabbitmq] = makeRequeueConsumer($scanner);
+        $job = requeueJob($rabbitmq, $channel, mockAMQPMessage(), 'events:ordered');
 
-        expect($consumer->callShouldRetryInOrder($job))->toBeTrue();
+        expect($consumer->callRequeuePreservesAttempts($job))->toBeTrue();
     });
 
-    it('is false for a quorum queue without a single active consumer', function () {
+    it('is false for a classic queue (no delivery counter, would churn)', function () {
         $scanner = Mockery::mock(AttributeScanner::class);
-        $scanner->shouldReceive('getAttributeForQueue')->with('default')->andReturn(commutativeQueueAttribute());
+        $scanner->shouldReceive('getAttributeForQueue')->with('events:classic')->andReturn(classicQueueAttribute());
 
-        [$consumer, $channel, $rabbitmq] = makeOrderRetryConsumer($scanner);
-        $job = orderRetryJob($rabbitmq, $channel, mockAMQPMessage(), 'default');
+        [$consumer, $channel, $rabbitmq] = makeRequeueConsumer($scanner);
+        $job = requeueJob($rabbitmq, $channel, mockAMQPMessage(), 'events:classic');
 
-        expect($consumer->callShouldRetryInOrder($job))->toBeFalse();
+        expect($consumer->callRequeuePreservesAttempts($job))->toBeFalse();
     });
 
     it('is false when the queue has no discovered attribute', function () {
         $scanner = Mockery::mock(AttributeScanner::class);
         $scanner->shouldReceive('getAttributeForQueue')->with('mystery')->andReturnNull();
 
-        [$consumer, $channel, $rabbitmq] = makeOrderRetryConsumer($scanner);
-        $job = orderRetryJob($rabbitmq, $channel, mockAMQPMessage(), 'mystery');
+        [$consumer, $channel, $rabbitmq] = makeRequeueConsumer($scanner);
+        $job = requeueJob($rabbitmq, $channel, mockAMQPMessage(), 'mystery');
 
-        expect($consumer->callShouldRetryInOrder($job))->toBeFalse();
-    });
-
-    it('is false when the running consumer prefetch is greater than 1', function () {
-        // Even a single-active quorum queue must NOT retry in place if the
-        // consumer runs at prefetch > 1 — successors may already be in flight.
-        $scanner = Mockery::mock(AttributeScanner::class);
-        // The prefetch gate short-circuits before the attribute is consulted.
-        $scanner->shouldReceive('getAttributeForQueue')->never();
-
-        [$consumer, $channel, $rabbitmq] = makeOrderRetryConsumer($scanner);
-        $consumer->setPrefetch(10);
-
-        $job = orderRetryJob($rabbitmq, $channel, mockAMQPMessage(), 'ordered.shard.0');
-
-        expect($consumer->callShouldRetryInOrder($job))->toBeFalse();
+        expect($consumer->callRequeuePreservesAttempts($job))->toBeFalse();
     });
 });

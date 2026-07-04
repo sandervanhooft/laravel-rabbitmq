@@ -127,7 +127,7 @@ test('calculates attempts from x-death header', function () {
 
 test('calculates attempts from quorum x-delivery-count header', function () {
     // Quorum queues expose the number of prior deliveries; the header is absent
-    // on the first delivery and equals 2 after two in-place requeues.
+    // on the first delivery and equals 2 after two requeues.
     $message = mockAMQPMessage([
         'headers' => ['x-delivery-count' => 2],
     ]);
@@ -187,11 +187,11 @@ test('payload attempts still take precedence over broker headers', function () {
     expect($job->attempts())->toBe(7);
 });
 
-test('requeue rejects the message in place with requeue = true', function () {
+test('requeue rejects the message with requeue = true', function () {
     $message = mockAMQPMessage(['deliveryTag' => 42]);
 
-    // Order-preserving retry returns the message to the head of the quorum
-    // queue: basic_reject with requeue = true, and no tail re-publish.
+    // Returns the SAME message so the quorum delivery counter advances:
+    // basic_reject with requeue = true, and no fresh re-publish.
     $this->mockChannel->shouldReceive('basic_reject')
         ->once()
         ->with(42, true)
