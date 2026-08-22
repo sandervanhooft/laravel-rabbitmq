@@ -6,12 +6,12 @@ namespace Lettermint\RabbitMQ\Queue;
 
 use DateInterval;
 use DateTimeInterface;
-use InvalidArgumentException;
 use Illuminate\Contracts\Queue\Job;
 use Illuminate\Contracts\Queue\Queue as QueueContract;
 use Illuminate\Queue\Queue;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use InvalidArgumentException;
 use Lettermint\RabbitMQ\Connection\ChannelManager;
 use Lettermint\RabbitMQ\Contracts\HasPriority;
 use Lettermint\RabbitMQ\Contracts\HasRoutingKey;
